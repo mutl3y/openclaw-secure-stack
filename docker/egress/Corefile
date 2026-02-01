@@ -1,5 +1,5 @@
 . {
-    forward . 8.8.8.8 8.8.4.4
+    forward . 1.1.1.2 1.0.0.2
     log
     errors
 }
