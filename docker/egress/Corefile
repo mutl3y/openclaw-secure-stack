@@ -1,5 +1,5 @@
 . {
-    file /etc/coredns/allowlist.db
+    forward . 8.8.8.8 8.8.4.4
     log
     errors
 }
