@@ -21,7 +21,7 @@ The proxy listens on `http://localhost:8000` by default (uvicorn default).
 
 ## Running Tests
 
-The test suite has 112 tests across three categories:
+The test suite has 117 tests across three categories:
 
 ```bash
 # All tests
@@ -69,7 +69,7 @@ Rules are defined in `config/scanner-rules.json` and implemented as AST walkers 
 | **Filesystem Abuse** | FS_WRITE | writeFileSync, appendFile, createWriteStream |
 | | FS_DELETE | unlink, rmdir, rmSync |
 
-The scanner uses tree-sitter to parse JS/TS into an AST before applying rules. Domains `api.openai.com` and `api.anthropic.com` are allowlisted by default for network rules.
+The scanner uses tree-sitter to parse JS/TS into an AST before applying rules. Domains `api.openai.com` and `api.anthropic.com` are allowlisted by default in the network exfiltration scanner rules.
 
 ### Adding a New Scanner Rule
 

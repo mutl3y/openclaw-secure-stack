@@ -41,6 +41,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_TOKEN}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
     volumes:
       - openclaw-data:/home/openclaw/.openclaw
     networks:
@@ -64,6 +65,27 @@ services:
     dns:
       - 172.28.0.10
 
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "${CADDY_PORT:-8443}:443"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - internal
+    depends_on:
+      openclaw:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+
   egress-dns:
     build: docker/egress
     volumes:
@@ -84,6 +106,8 @@ services:
 volumes:
   audit-data:
   openclaw-data:
+  caddy-data:
+  caddy-config:
 
 networks:
   internal:

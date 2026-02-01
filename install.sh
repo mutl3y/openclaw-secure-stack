@@ -272,6 +272,9 @@ main() {
           c.gateway.http = c.gateway.http || {};
           c.gateway.http.endpoints = c.gateway.http.endpoints || {};
           c.gateway.http.endpoints.chatCompletions = { enabled: true };
+          c.gateway.trustedProxies = ['172.28.0.0/16'];
+          c.gateway.controlUi = c.gateway.controlUi || {};
+          c.gateway.controlUi.allowInsecureAuth = true;
           fs.writeFileSync(p, JSON.stringify(c, null, 2));
         "
 
