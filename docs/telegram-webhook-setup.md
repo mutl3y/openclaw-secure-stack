@@ -1,17 +1,89 @@
 # Telegram Webhook Setup with Cloudflare Tunnel
 
-This guide shows how to connect your Telegram bot to the OpenClaw Secure Stack using Cloudflare Tunnel for local development and testing.
+This guide shows how to connect your Telegram bot to the OpenClaw Secure Stack using Cloudflare Tunnel.
 
-## Why Use Webhooks?
+## Do You Need Webhooks? Choose Your Mode
 
-Telegram supports two modes for receiving messages:
+### Personal Use (Solo or Small Trusted Team)
+
+**Use long polling** — simpler, no tunnel required:
+
+✅ **When to use**:
+- Only you use the bot on your personal phone
+- Small trusted team (5-10 people you know)
+- No need for centralized audit logs
+- Don't need governance approval workflows
+
+✅ **What protects you**:
+- Telegram's authentication (your phone login)
+- Prompt-guard plugin (scans tool results for indirect injection)
+- Skill scanner (blocks dangerous code)
+- CoreDNS malware blocking (1.1.1.2)
+
+✅ **Setup**: Just set `TELEGRAM_BOT_TOKEN` in `.env` — OpenClaw auto-detects and uses long polling. No webhook URL needed.
+
+❌ **What you DON'T get**: Input sanitization via proxy, governance evaluation, per-user rate limiting, webhook audit events in proxy logs (OpenClaw still logs internally)
+
+### Public Bot or Multi-User Deployment
+
+**Use webhooks** — route messages through the proxy:
+
+✅ **When to use**:
+- Public bot (anyone can message it)
+- Need to protect against untrusted users
+- Want rate limiting per sender
+- Need governance approval gates
+- Require centralized audit logs for compliance
+
+✅ **Additional protections** (vs long polling):
+- Input sanitization (proxy strips prompt injection from user messages)
+- Governance evaluation (policy-based approval for sensitive operations)
+- Rate limiting (prevent abuse)
+- Webhook-specific audit events in proxy logs
+
+### Quick Comparison Table
+
+| Feature | Long Polling (Personal) | Webhooks (Public) |
+|---------|------------------------|-------------------|
+| **Setup complexity** | ✅ Simple (just env var) | ⚠️ Moderate (tunnel or domain) |
+| **Public endpoint required** | ❌ No | ✅ Yes |
+| **Indirect injection protection** | ✅ Yes (plugin) | ✅ Yes (plugin) |
+| **Direct injection protection** | ⚠️ User-level (Telegram auth) | ✅ Proxy-level (sanitizer) |
+| **Governance approval gates** | ❌ No | ✅ Yes |
+| **Per-sender rate limiting** | ❌ No | ✅ Yes |
+| **Centralized audit logs** | ⚠️ OpenClaw logs only | ✅ Proxy + OpenClaw logs |
+| **Best for** | Solo use, trusted team | Public bots, compliance |
+
+## Webhook Mode Architecture
 
 | Mode | How it works | Security |
 |------|--------------|----------|
-| **Long polling** | Your bot repeatedly asks Telegram "any new messages?" | ❌ Bypasses the proxy — OpenClaw fetches directly |
-| **Webhooks** | Telegram pushes messages to your URL | ✅ All traffic flows through the security pipeline |
+| **Long polling** | OpenClaw asks Telegram "any new messages?" | Telegram auth only |
+| **Webhooks** | Telegram pushes messages to your proxy URL | Full proxy pipeline |
 
-The secure stack **requires webhook mode** so that every Telegram message passes through authentication, sanitization, governance, and audit logging before reaching OpenClaw.
+```
+Long Polling:
+  Your phone → Telegram ← OpenClaw polls (outbound only)
+                               ↓
+                         [prompt-guard plugin scans tool results]
+
+Webhooks:
+  Your phone → Telegram → Your proxy → OpenClaw
+                            ↓
+                    [auth, sanitize, governance, audit]
+                            ↓
+                         [prompt-guard plugin scans tool results]
+```
+
+---
+
+## Webhook Setup Instructions
+
+**Note**: Only follow this section if you chose webhook mode above.
+
+### Why Use Webhooks?
+
+Webhooks route all Telegram messages through the proxy's security pipeline so that every message passes through authentication, sanitization, governance, and audit logging before reaching OpenClaw.
 
 ## Prerequisites
 

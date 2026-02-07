@@ -128,21 +128,30 @@ Get your token with: `grep OPENCLAW_TOKEN .env`
 
 ## Telegram Integration
 
-To connect OpenClaw to Telegram via webhooks (recommended for full security pipeline):
+### Choose Your Mode
 
+**Personal use (just you or small team)**:
 1. Create a bot with [@BotFather](https://t.me/BotFather) on Telegram
 2. Add the bot token to `.env`:
    ```
    TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
    ```
-3. Restart: `docker compose restart proxy`
-4. Set up a public URL for the webhook endpoint:
-   - **For local dev/testing**: Use Cloudflare Tunnel (see [Telegram Webhook Setup Guide](telegram-webhook-setup.md))
+3. Restart: `docker compose restart openclaw`
+4. Message your bot — OpenClaw uses **long polling** (no webhook needed)
+
+✅ **Protections active**: Prompt-guard plugin, skill scanner, malware-blocking DNS
+
+**Public bot or multi-user deployment**:
+1. Create a bot with [@BotFather](https://t.me/BotFather)
+2. Add the bot token to `.env` as above
+3. Set up a public URL for the webhook endpoint:
+   - **For local dev/testing**: Use Cloudflare Tunnel (see guide below)
    - **For production**: Configure your domain to point to the proxy's public IP
+4. Register the webhook URL with Telegram
 
-The proxy exposes a `/webhook/telegram` endpoint. Messages sent to your bot are relayed through the secure proxy pipeline (sanitization, governance, response scanning) before reaching OpenClaw.
+✅ **Additional protections**: Input sanitization, governance, rate limiting, centralized audit logs
 
-📖 **Detailed setup guide**: [docs/telegram-webhook-setup.md](telegram-webhook-setup.md)
+📖 **Webhook setup guide**: [docs/telegram-webhook-setup.md](telegram-webhook-setup.md) (explains when to use webhooks vs polling)
 
 ## WhatsApp Integration
 
