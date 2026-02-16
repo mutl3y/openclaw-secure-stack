@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-02-17
+
+### Added
+- **Native deployment for Ubuntu 24.04 LTS** — systemd-based alternative to Docker Compose
+  - Interactive shell installer (`deploy/native/install-native.sh`) with configuration prompts
+  - systemd service units with security hardening (`ProtectSystem=strict`, dropped capabilities)
+  - Caddy reverse proxy with automatic HTTPS (domain or localhost self-signed)
+  - Health check script (`health-check.sh`) for monitoring service status
+  - Automated daily backup script (`openclaw-backup.sh`) with 30-day retention
+  - Comprehensive deployment guide (`deploy/native/DEPLOYMENT.md`)
+  - Docker vs native comparison analysis (`deploy/native/COMPARISON.md`)
+  - Uninstaller script for clean removal
+
+### Fixed
+- **Native installer critical bugs** — 3 issues discovered in code review
+  - Missing `/etc/caddy/` directory creation (installer crash)
+  - Missing `caddy.service` systemd unit (service enable failure)
+  - Hardcoded `/mnt/data` paths ignoring configurable `HDD_MOUNT` (silent data loss)
+
 ## [1.2.0] - 2026-02-07
 
 ### Added
