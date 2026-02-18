@@ -348,28 +348,48 @@ onboard_openclaw() {
     echo ""
     info "OAuth complete ✓"
 
-    # Configure OpenClaw
+    # Configure OpenClaw post-onboarding
+    # Notes:
+    #  - gateway.port must be 3000 (onboarding wizard may pick a different default)
+    #  - plugins must be a PluginsConfig object, NOT an array
+    #  - trustedProxies allows the Docker proxy (host network) to pass real client IPs
     info "Configuring OpenClaw..."
     sudo -u openclaw -E env HOME=/var/lib/openclaw \
         node -e "
           const fs = require('fs');
           const p = '/var/lib/openclaw/.openclaw/openclaw.json';
           const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+
+          // Enforce port 3000 (wizard may set a different default)
           c.gateway = c.gateway || {};
+          c.gateway.port = 3000;
+          c.gateway.bind = 'loopback';
+
+          // Enable HTTP chat completions endpoint
           c.gateway.http = c.gateway.http || {};
           c.gateway.http.endpoints = c.gateway.http.endpoints || {};
           c.gateway.http.endpoints.chatCompletions = { enabled: true };
+
+          // Trust the local Docker proxy (host network) for X-Forwarded-For headers
           c.gateway.trustedProxies = ['127.0.0.1/32'];
-          c.plugins = c.plugins || [];
-          if (!c.plugins.some(function(p2) { return p2.name === 'prompt-guard'; })) {
-            c.plugins.push({
-              name: 'prompt-guard',
-              path: '/opt/openclaw-secure-stack/plugins/prompt-guard',
-              enabled: true
-            });
-          }
+
+          // Register prompt-guard plugin (must be PluginsConfig object, not array)
+          c.plugins = {
+            load: { paths: ['/opt/openclaw-secure-stack/plugins/prompt-guard'] },
+            entries: { 'prompt-guard': { enabled: true } }
+          };
+
           fs.writeFileSync(p, JSON.stringify(c, null, 2));
         "
+
+    # Re-read the actual token written by the onboarding wizard — it may differ
+    # from the pre-generated value if the wizard set its own default.
+    GATEWAY_TOKEN=$(sudo -u openclaw -E env HOME=/var/lib/openclaw \
+        node -e "
+          const fs = require('fs');
+          const c = JSON.parse(fs.readFileSync('/var/lib/openclaw/.openclaw/openclaw.json', 'utf8'));
+          process.stdout.write(c.gateway.auth.token);
+        ")
 
     info "OpenClaw configured ✓"
 }
@@ -418,7 +438,7 @@ Group=openclaw
 WorkingDirectory=/opt/openclaw
 Environment="HOME=/var/lib/openclaw"
 Environment="NODE_ENV=production"
-ExecStart=/usr/bin/node /opt/openclaw/dist/index.js gateway start
+ExecStart=/usr/bin/node /opt/openclaw/dist/index.js gateway run
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
@@ -456,7 +476,8 @@ deploy_docker_proxy() {
             sed -i "s|/home/openclaw-data/openclaw-audit|$HDD_MOUNT/openclaw-audit|g" docker-compose.yml
         fi
     else
-        # Fallback: generate inline docker-compose with user's HDD path
+        # Fallback: generate inline docker-compose with user's HDD path.
+        # Keep in sync with deploy/hybrid/docker-compose.hybrid.yml.
         cat > docker-compose.yml <<EOF
 version: '3.8'
 
@@ -471,8 +492,18 @@ services:
     environment:
       - UPSTREAM_URL=http://127.0.0.1:3000
       - OPENCLAW_TOKEN=\${OPENCLAW_TOKEN}
+      - OPENAI_API_KEY=\${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=\${ANTHROPIC_API_KEY:-}
       - GOVERNANCE_ENABLED=true
       - GOVERNANCE_SECRET=\${GOVERNANCE_SECRET}
+      - GOVERNANCE_APPROVAL_TIMEOUT=3600
+      - GOVERNANCE_ALLOW_SELF_APPROVAL=true
+      - WEBHOOK_RATE_LIMIT=60
+      - TELEGRAM_BOT_TOKEN=\${TELEGRAM_BOT_TOKEN:-}
+      - WHATSAPP_APP_SECRET=\${WHATSAPP_APP_SECRET:-}
+      - WHATSAPP_VERIFY_TOKEN=\${WHATSAPP_VERIFY_TOKEN:-}
+      - WHATSAPP_PHONE_NUMBER_ID=\${WHATSAPP_PHONE_NUMBER_ID:-}
+      - WHATSAPP_ACCESS_TOKEN=\${WHATSAPP_ACCESS_TOKEN:-}
       - AUDIT_LOG_PATH=/app/audit/audit.jsonl
     volumes:
       - ./config:/app/config:ro
@@ -507,12 +538,10 @@ start_and_verify() {
     info "Starting OpenClaw..."
     systemctl start openclaw
 
-    sleep 5
-
-    # Wait for OpenClaw
+    # Wait for OpenClaw to actually bind to port 3000 (process liveness ≠ readiness)
     retries=0
     while [ $retries -lt 30 ]; do
-        if curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1; then
+        if ss -tlnp 2>/dev/null | grep -q ':3000 '; then
             break
         fi
         sleep 2
@@ -520,12 +549,12 @@ start_and_verify() {
     done
 
     if [ $retries -ge 30 ]; then
-        warn "OpenClaw health check timeout"
+        warn "OpenClaw did not bind to port 3000 in time — check: journalctl -u openclaw -n 30"
     else
-        info "OpenClaw is healthy ✓"
+        info "OpenClaw is listening on :3000 ✓"
     fi
 
-    # Wait for proxy
+    # Wait for proxy HTTP endpoint
     retries=0
     while [ $retries -lt 30 ]; do
         if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then
@@ -538,7 +567,27 @@ start_and_verify() {
     if [ $retries -ge 30 ]; then
         warn "Proxy health check timeout"
     else
-        info "Proxy is healthy ✓"
+        info "Proxy is listening on :8080 ✓"
+    fi
+
+    # End-to-end connectivity: send a request through the proxy to OpenClaw.
+    # A 502/503 means the proxy cannot reach OpenClaw; any other status confirms the path.
+    TOKEN=$(grep '^OPENCLAW_TOKEN=' /opt/openclaw-secure-stack/.env 2>/dev/null | cut -d= -f2-)
+    if [ -n "$TOKEN" ]; then
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST http://127.0.0.1:8080/v1/chat/completions \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}],"max_tokens":1}' \
+            2>/dev/null || echo "000")
+        if [ "$HTTP_STATUS" = "502" ] || [ "$HTTP_STATUS" = "503" ] || [ "$HTTP_STATUS" = "000" ]; then
+            warn "End-to-end test failed (HTTP $HTTP_STATUS) — proxy cannot reach OpenClaw"
+            warn "Debug: journalctl -u openclaw -n 30 | ss -tlnp | grep 3000"
+        else
+            info "End-to-end proxy → OpenClaw connectivity confirmed (HTTP $HTTP_STATUS) ✓"
+        fi
+    else
+        warn "Could not read OPENCLAW_TOKEN from .env — skipping end-to-end test"
     fi
 }
 
@@ -581,7 +630,21 @@ show_summary() {
     if [ "$USE_TUNNEL" = "true" ]; then
         info "Next Steps:"
         info "  1. Test: curl https://$DOMAIN_NAME/health"
-        info "  2. Configure Cloudflare WAF/rate limiting (optional)"
+        info ""
+        info "  To enable Telegram bot:"
+        info "  2. Create a bot via @BotFather on Telegram, copy the token"
+        info "  3. Edit .env:  sudo nano /opt/openclaw-secure-stack/.env"
+        info "     Set:  TELEGRAM_BOT_TOKEN=<your-token>"
+        info "  4. Restart proxy:"
+        info "     sudo docker compose -f /opt/openclaw-secure-stack/docker-compose.yml up -d --force-recreate"
+        info "  5. Register the webhook (run on server):"
+        info "     BOT_TOKEN=\$(sudo grep TELEGRAM_BOT_TOKEN /opt/openclaw-secure-stack/.env | cut -d= -f2)"
+        info "     SECRET=\$(echo -n \"\$BOT_TOKEN\" | sha256sum | cut -d' ' -f1)"
+        info "     curl -s -X POST \"https://api.telegram.org/bot\${BOT_TOKEN}/setWebhook\" \\"
+        info "       -H 'Content-Type: application/json' \\"
+        info "       -d \"{\\\"url\\\": \\\"https://$DOMAIN_NAME/webhook/telegram\\\", \\\"allowed_updates\\\": [\\\"message\\\"], \\\"secret_token\\\": \\\"\${SECRET}\\\"}\""
+        info ""
+        info "  See docs/openclaw-cloudflare-tunnel-setup.md for the full Telegram setup guide."
     fi
     echo ""
 }

@@ -265,11 +265,19 @@ All should be `active (running)` or `Up`.
 
 ```bash
 # On the server
-curl http://127.0.0.1:3000/health  # OpenClaw
-curl http://127.0.0.1:8080/health  # Proxy
+
+# OpenClaw native — check via systemd (it's a WebSocket server, not HTTP)
+sudo systemctl is-active openclaw   # should print: active
+
+# Proxy (Docker) — HTTP health endpoint
+curl http://127.0.0.1:8080/health
 ```
 
-Both should return: `{"status":"healthy"}`
+Proxy should return: `{"status":"ok"}`
+
+> **Note:** OpenClaw listens on `ws://127.0.0.1:3000` (WebSocket protocol).
+> Plain `curl http://127.0.0.1:3000/health` will hang and is not a valid health check.
+> Use `systemctl is-active openclaw` or `journalctl -u openclaw -n 5` instead.
 
 ### 4.3 Public Health Check
 
@@ -306,9 +314,113 @@ curl -X POST https://yourdomain.com/v1/chat/completions \
 
 ---
 
-## Part 5: Monitoring & Maintenance
+## Part 5: Telegram Bot Setup (Optional)
 
-### 5.1 View Logs
+Connect your OpenClaw deployment to Telegram so you can chat with it from your phone.
+
+### 5.1 Create a Telegram Bot
+
+1. Open Telegram and search for **@BotFather**
+2. Send `/newbot`
+3. Follow the prompts — choose a name and username (must end in `bot`)
+4. BotFather replies with your **bot token**: `123456789:AAH...`
+
+**Save the token** — you need it in the next step.
+
+### 5.2 Add Token to .env
+
+On the server:
+
+```bash
+sudo nano /opt/openclaw-secure-stack/.env
+```
+
+Find the line `TELEGRAM_BOT_TOKEN=` and set it:
+
+```
+TELEGRAM_BOT_TOKEN=123456789:AAH...your-token-here...
+```
+
+Save (`Ctrl+X`, `Y`, `Enter`).
+
+### 5.3 Restart the Proxy
+
+The proxy only activates the Telegram webhook route when `TELEGRAM_BOT_TOKEN` is set. Restart to pick up the change:
+
+```bash
+sudo docker compose -f /opt/openclaw-secure-stack/docker-compose.yml up -d --force-recreate
+```
+
+Verify it's running:
+
+```bash
+curl http://127.0.0.1:8080/health   # should return {"status":"ok"}
+```
+
+### 5.4 Register the Webhook with Telegram
+
+Telegram needs to know which URL to POST messages to. Run this on the server (replace `yourdomain.com`):
+
+```bash
+BOT_TOKEN=$(sudo grep TELEGRAM_BOT_TOKEN /opt/openclaw-secure-stack/.env | cut -d= -f2)
+
+# The proxy verifies requests using sha256(bot_token) as the secret
+SECRET=$(echo -n "$BOT_TOKEN" | sha256sum | cut -d' ' -f1)
+
+curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+  -H 'Content-Type: application/json' \
+  -d "{\"url\": \"https://yourdomain.com/webhook/telegram\", \"allowed_updates\": [\"message\"], \"secret_token\": \"${SECRET}\"}" \
+  | python3 -m json.tool
+```
+
+**Expected output:**
+```json
+{
+    "ok": true,
+    "result": true,
+    "description": "Webhook was set"
+}
+```
+
+> **Why `secret_token`?** The proxy validates every incoming Telegram request by comparing the `X-Telegram-Bot-Api-Secret-Token` header against `sha256(bot_token)`. Telegram only sends this header if you provide it during `setWebhook`. Without it, every request returns 401.
+
+### 5.5 Verify Webhook
+
+```bash
+BOT_TOKEN=$(sudo grep TELEGRAM_BOT_TOKEN /opt/openclaw-secure-stack/.env | cut -d= -f2)
+curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" | python3 -m json.tool
+```
+
+**Expected:**
+```json
+{
+    "result": {
+        "url": "https://yourdomain.com/webhook/telegram",
+        "pending_update_count": 0,
+        "last_error_message": "none"
+    }
+}
+```
+
+If `last_error_message` shows `"401 Unauthorized"`, the `secret_token` was not included. Re-run Step 5.4 carefully.
+
+### 5.6 Test the Bot
+
+Send any message to your bot in Telegram. It should reply within a few seconds.
+
+To watch requests in real-time:
+
+```bash
+sudo docker logs -f openclaw-proxy
+```
+
+You should see `POST /webhook/telegram HTTP/1.1" 200 OK` for each message.
+
+---
+
+## Part 6: Monitoring & Maintenance
+
+### 6.1 View Logs
 
 ```bash
 # OpenClaw (native)
@@ -323,7 +435,7 @@ sudo journalctl -u cloudflared -f
 
 Press `Ctrl+C` to stop.
 
-### 5.2 Restart Services
+### 6.2 Restart Services
 
 ```bash
 # OpenClaw
@@ -336,7 +448,7 @@ docker compose -f /opt/openclaw-secure-stack/docker-compose.yml restart
 sudo systemctl restart cloudflared
 ```
 
-### 5.3 Update OpenClaw (Stable Release)
+### 6.3 Update OpenClaw (Stable Release)
 
 ```bash
 cd /opt/openclaw
@@ -347,7 +459,7 @@ sudo pnpm build
 sudo systemctl restart openclaw
 ```
 
-### 5.4 Update Proxy
+### 6.4 Update Proxy
 
 ```bash
 cd /opt/openclaw-secure-stack
@@ -358,7 +470,7 @@ docker compose up -d proxy
 
 ---
 
-## Part 6: Troubleshooting
+## Part 7: Troubleshooting
 
 ### Tunnel Not Connecting
 
@@ -382,6 +494,23 @@ sudo lsof -i :3000  # Check if port in use
 **Common issues:**
 - pnpm dependencies not installed
 - Missing OAuth credentials in `/var/lib/openclaw/.openclaw/openclaw.json`
+
+### Expected Startup Warnings
+
+These two log lines appear on every startup:
+
+```
+[prompt-guard] Failed to load rules from .../indirect-injection-rules.json
+[gateway] [plugins] prompt-guard missing register/activate export
+```
+
+**What they mean:**
+
+- **`Failed to load rules`** — The prompt-guard TypeScript module loaded successfully, but its rules file path could not be resolved relative to OpenClaw's working directory. This means the `tool_result_persist` hook's injection pattern scanning has no rules to apply if the hook were active.
+
+- **`missing register/activate export`** — OpenClaw's plugin loader requires a named `register()` or `activate()` export to wire up hooks. The prompt-guard plugin uses `export default { hooks: { before_tool_call, tool_result_persist } }`, which OpenClaw does **not** recognize. As a result, **the `before_tool_call` and `tool_result_persist` hooks are not active** in OpenClaw's native hook system.
+
+**Security posture:** These warnings mean prompt-guard does not add a hook layer inside OpenClaw. The **Python proxy layer is the primary enforcement path** — the governance middleware, content sanitizer, and rate limiter operate on every request before it reaches OpenClaw, providing equivalent protection independently of this plugin.
 
 ### Proxy Not Starting
 
@@ -412,17 +541,43 @@ cat /etc/cloudflared/config.yml  # Verify points to localhost:8080
 curl http://127.0.0.1:8080/health
 ```
 
+### Telegram Bot Not Responding
+
+```bash
+# Step 1: verify the webhook URL and check for errors
+BOT_TOKEN=$(sudo grep TELEGRAM_BOT_TOKEN /opt/openclaw-secure-stack/.env | cut -d= -f2)
+curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" | python3 -m json.tool
+```
+
+**Common issues:**
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `url: ""` | Webhook not registered | Run Step 5.4 |
+| `401 Unauthorized` | Missing or wrong `secret_token` | Re-run Step 5.4 with `secret_token` |
+| `pending_update_count` keeps growing | Proxy not running | `curl http://127.0.0.1:8080/health` |
+| 200 OK in logs but no reply | Upstream returning error | Test upstream directly (see below) |
+
+```bash
+# Test OpenClaw upstream directly
+OPENCLAW_TOKEN=$(sudo grep OPENCLAW_TOKEN /opt/openclaw-secure-stack/.env | cut -d= -f2)
+curl -s -X POST http://127.0.0.1:3000/v1/chat/completions \
+  -H "Authorization: Bearer ${OPENCLAW_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"default","messages":[{"role":"user","content":"hello"}]}'
+```
+
 ---
 
-## Part 7: Cloudflare Security (Optional)
+## Part 8: Cloudflare Security (Optional)
 
-### 7.1 Enable WAF
+### 8.1 Enable WAF
 
 In Cloudflare Dashboard:
 1. **Security** → **WAF**
 2. Enable **OWASP Core Ruleset**
 
-### 7.2 Rate Limiting
+### 8.2 Rate Limiting
 
 1. **Security** → **Rate Limiting Rules**
 2. Create rule:
@@ -431,7 +586,7 @@ In Cloudflare Dashboard:
    - **Then:** Block for 60s
    - **When:** > 100 requests/min
 
-### 7.3 IP Access Control
+### 8.3 IP Access Control
 
 1. **Security** → **WAF** → **Custom Rules**
 2. Allow only your IP:
