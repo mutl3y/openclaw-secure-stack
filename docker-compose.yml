@@ -67,7 +67,7 @@ services:
       - PROMPT_GUARD_ENFORCEMENT=${PROMPT_GUARD_ENFORCEMENT:-true}
       - QUARANTINE_LIST_PATH=/home/openclaw/config/quarantine-list.json
     volumes:
-      - ./.local-volumes/openclaw-data:/home/openclaw/.openclaw
+      - openclaw-data:/home/openclaw
       - ./plugins/prompt-guard:/home/openclaw/plugins/prompt-guard:ro
       - ./config/indirect-injection-rules.json:/home/openclaw/config/indirect-injection-rules.json:ro
       - ./config/quarantine-list.json:/home/openclaw/config/quarantine-list.json:ro
@@ -81,7 +81,7 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
-    read_only: true
+    # read_only: true
     tmpfs:
       - /tmp:size=100M
     cap_drop:
@@ -105,7 +105,7 @@ services:
     depends_on:
       proxy:
         condition: service_started
-    read_only: true
+    # read_only: true
     cap_drop:
       - ALL
     cap_add:
@@ -139,3 +139,5 @@ networks:
         - subnet: 172.28.0.0/16
   egress:
     driver: bridge
+volumes:
+  openclaw-data:

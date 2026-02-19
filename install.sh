@@ -249,6 +249,7 @@ main() {
 
     # Ensure the openclaw-data volume exists
     $CONTAINER_RT volume create openclaw-secure-stack_openclaw-data 2>/dev/null || true
+    $CONTAINER_RT run --rm -v openclaw-secure-stack_openclaw-data:/data alpine sh -c "chown -Rv 65534:65534 /data"
 
     # Run onboard inside the openclaw image to configure credentials
     info "Configuring OpenClaw gateway..."
@@ -257,7 +258,7 @@ main() {
         $CONTAINER_RT run --rm -it \
             --user 65534 \
             -e HOME=/home/openclaw \
-            -v openclaw-secure-stack_openclaw-data:/home/openclaw/.openclaw \
+            -v openclaw-secure-stack_openclaw-data:/home/openclaw \
             "$openclaw_image" \
             node dist/index.js onboard \
                 --mode local \
@@ -276,7 +277,7 @@ main() {
         $CONTAINER_RT run --rm \
             --user 65534 \
             -e HOME=/home/openclaw \
-            -v openclaw-secure-stack_openclaw-data:/home/openclaw/.openclaw \
+            -v openclaw-secure-stack_openclaw-data:/home/openclaw \
             "$openclaw_image" \
             node dist/index.js onboard \
                 --non-interactive \
@@ -299,7 +300,7 @@ main() {
     $CONTAINER_RT run --rm \
         --user 65534 \
         -e HOME=/home/openclaw \
-        -v openclaw-secure-stack_openclaw-data:/home/openclaw/.openclaw \
+        -v openclaw-secure-stack_openclaw-data:/home/openclaw \
         "$openclaw_image" \
         node -e "
           const fs = require('fs');
@@ -312,12 +313,11 @@ main() {
           c.gateway.trustedProxies = ['172.28.0.0/16'];
           c.gateway.controlUi = c.gateway.controlUi || {};
           c.gateway.controlUi.allowInsecureAuth = true;
-          c.plugins = c.plugins || [];
-          if (!c.plugins.some(function(p2) { return p2.name === 'prompt-guard'; })) {
-            c.plugins.push({ name: 'prompt-guard', path: '/home/openclaw/plugins/prompt-guard', enabled: true });
-          }
           fs.writeFileSync(p, JSON.stringify(c, null, 2));
         "
+
+
+
 
     # Start all services
     info "Starting services..."
