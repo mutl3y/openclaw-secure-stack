@@ -368,9 +368,15 @@ class TestMultimodalRelayPipeline:
 
     @pytest.mark.asyncio
     async def test_body_size_includes_attachment_bytes(self) -> None:
-        """NFR-7: Body size limit includes attachment binary data."""
-        big_data = b"x" * (10 * 1024 * 1024 + 1)  # slightly over 10MB
-        attachment = _make_attachment(data=big_data)
+        """NFR-7: Body size limit is based on base64-encoded attachment size.
+
+        Attachments are base64-encoded before being sent upstream (~33% expansion),
+        so the check uses the encoded size. The raw-byte threshold that triggers the
+        10MB limit is ~7.5MB (10MB * 3/4). A 7.5MB raw file encodes to just over 10MB.
+        """
+        # 7,864,321 bytes raw → base64 size = (7864321+2)//3*4 = 10,485,764 > 10MB limit
+        slightly_over_threshold = b"x" * (10 * 1024 * 1024 * 3 // 4 + 1)
+        attachment = _make_attachment(data=slightly_over_threshold)
         pipeline = _make_pipeline()
         msg = _make_webhook_message(text="", attachments=[attachment])
 

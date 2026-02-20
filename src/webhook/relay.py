@@ -37,14 +37,6 @@ logger = logging.getLogger(__name__)
 _MAX_BODY_SIZE = 10 * 1024 * 1024  # 10MB (NFR-7)
 
 
-def _attachment_summary(attachment: Attachment) -> str:
-    """Return a concise text summary for conversation history storage.
-
-    Summaries are stored in history instead of base64 blobs to avoid
-    unbounded context growth across multi-turn conversations.
-    """
-    return f"[{attachment.type.value}: {attachment.file_name}]"
-
 
 def _build_content_parts(
     text: str,
@@ -133,9 +125,10 @@ class WebhookRelayPipeline:
         """Run the full relay pipeline for a webhook message."""
 
         # Stage 1: Body size check (NFR-7)
-        # Include attachment bytes in the size calculation
+        # Attachment data is base64-encoded before forwarding, expanding it by ~33%.
+        # Use the encoded size (ceil(n/3)*4) so the limit reflects what is actually sent.
         text_bytes = len(message.text.encode())
-        attachment_bytes = sum(len(a.data) for a in message.attachments)
+        attachment_bytes = sum((len(a.data) + 2) // 3 * 4 for a in message.attachments)
         if text_bytes + attachment_bytes > _MAX_BODY_SIZE:
             return WebhookResponse(
                 text="Request body too large",
