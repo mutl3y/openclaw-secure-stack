@@ -417,6 +417,20 @@ def _register_webhook_routes(
             )
 
             if not extraction.text and not attachments:
+                # If the user sent files but all downloads failed, notify them
+                # rather than silently returning 200 (which loses their message).
+                if extraction.file_infos:
+                    try:
+                        await tg_relay.send_response(
+                            chat_id=extraction.chat_id,
+                            text="Sorry, I couldn't download your file(s). Please try again.",
+                        )
+                    except Exception:
+                        logging.exception("Failed to send Telegram file-error response")
+                    return JSONResponse(
+                        {"status": "error", "message": "File download failed, user notified"},
+                        status_code=200,
+                    )
                 return JSONResponse({"status": "ok", "message": "No content to process"})
 
             # Audit: received

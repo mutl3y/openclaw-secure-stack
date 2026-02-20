@@ -218,9 +218,19 @@ class WebhookRelayPipeline:
 
         # History stores lightweight text summaries (not base64 blobs) for
         # each attachment to prevent context growth across multi-turn sessions.
+        # Filenames come from the Telegram payload and are user-controlled, so
+        # each one must be sanitized before being appended to history_text.
+        # On injection detection the filename is replaced with its safe type label.
         history_text = clean_text
         if message.attachments:
-            summaries = " ".join(_attachment_summary(a) for a in message.attachments)
+            safe_summaries: list[str] = []
+            for a in message.attachments:
+                try:
+                    safe_name = self._sanitizer.sanitize(a.file_name).clean
+                except PromptInjectionError:
+                    safe_name = a.type.value  # fall back to enum label only
+                safe_summaries.append(f"[{a.type.value}: {safe_name}]")
+            summaries = " ".join(safe_summaries)
             history_text = f"{clean_text} {summaries}".strip()
 
         if self._history:
