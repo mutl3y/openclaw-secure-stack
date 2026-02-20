@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.governance.models import GovernanceDecision
-from src.webhook.models import WebhookMessage, WebhookResponse
-from src.webhook.relay import WebhookRelayPipeline
+from src.webhook.models import Attachment, AttachmentType, WebhookMessage, WebhookResponse
+from src.webhook.relay import WebhookRelayPipeline, _build_content_parts
 
 
 def _make_pipeline(**kwargs: Any) -> WebhookRelayPipeline:
@@ -27,11 +28,12 @@ def _make_pipeline(**kwargs: Any) -> WebhookRelayPipeline:
 
 
 def _make_webhook_message(**kwargs: Any) -> WebhookMessage:
-    defaults = {
+    defaults: dict[str, Any] = {
         "source": "telegram",
         "text": "hello",
         "sender_id": "user123",
         "metadata": {},
+        "attachments": [],
     }
     defaults.update(kwargs)
     return WebhookMessage(**defaults)
@@ -265,3 +267,169 @@ class TestWebhookGovernance:
             for call in audit.log.call_args_list
         )
         assert gov_logged
+
+
+def _make_attachment(
+    *,
+    file_type: AttachmentType = AttachmentType.IMAGE,
+    mime_type: str = "image/jpeg",
+    file_name: str = "photo.jpg",
+    data: bytes = b"fake image data",
+) -> Attachment:
+    return Attachment(
+        type=file_type,
+        file_id="test_file_id",
+        mime_type=mime_type,
+        file_name=file_name,
+        file_size=len(data),
+        data=data,
+    )
+
+
+class TestBuildContentParts:
+    """Unit tests for the _build_content_parts helper function."""
+
+    def test_no_attachments_returns_plain_string(self) -> None:
+        """Backward compatibility: text-only messages remain plain strings."""
+        result = _build_content_parts("hello world", [])
+        assert result == "hello world"
+        assert isinstance(result, str)
+
+    def test_image_produces_image_url_block(self) -> None:
+        data = b"image bytes"
+        attachment = _make_attachment(
+            file_type=AttachmentType.IMAGE,
+            mime_type="image/jpeg",
+            data=data,
+        )
+        result = _build_content_parts("look at this", [attachment])
+        assert isinstance(result, list)
+
+        text_parts = [p for p in result if p["type"] == "text"]
+        image_parts = [p for p in result if p["type"] == "image_url"]
+        assert len(text_parts) == 1
+        assert text_parts[0]["text"] == "look at this"
+        assert len(image_parts) == 1
+        expected_b64 = base64.b64encode(data).decode()
+        assert image_parts[0]["image_url"]["url"] == f"data:image/jpeg;base64,{expected_b64}"
+
+    def test_sticker_produces_image_url_block(self) -> None:
+        attachment = _make_attachment(
+            file_type=AttachmentType.STICKER,
+            mime_type="image/webp",
+            file_name="sticker.webp",
+        )
+        result = _build_content_parts("", [attachment])
+        assert isinstance(result, list)
+        image_parts = [p for p in result if p["type"] == "image_url"]
+        assert len(image_parts) == 1
+        assert "data:image/webp;base64," in image_parts[0]["image_url"]["url"]
+
+    def test_document_produces_file_block(self) -> None:
+        data = b"%PDF-1.4 content"
+        attachment = _make_attachment(
+            file_type=AttachmentType.DOCUMENT,
+            mime_type="application/pdf",
+            file_name="report.pdf",
+            data=data,
+        )
+        result = _build_content_parts("see attached", [attachment])
+        assert isinstance(result, list)
+        file_parts = [p for p in result if p["type"] == "file"]
+        assert len(file_parts) == 1
+        assert file_parts[0]["file"]["filename"] == "report.pdf"
+        assert file_parts[0]["file"]["content_type"] == "application/pdf"
+        assert file_parts[0]["file"]["data"] == base64.b64encode(data).decode()
+
+    def test_voice_produces_input_audio_block(self) -> None:
+        attachment = _make_attachment(
+            file_type=AttachmentType.VOICE,
+            mime_type="audio/ogg",
+            file_name="voice.ogg",
+            data=b"ogg audio data",
+        )
+        result = _build_content_parts("", [attachment])
+        assert isinstance(result, list)
+        audio_parts = [p for p in result if p["type"] == "input_audio"]
+        assert len(audio_parts) == 1
+        assert audio_parts[0]["input_audio"]["format"] == "ogg"
+
+    def test_text_only_part_omitted_when_empty(self) -> None:
+        """No text part emitted when text is empty (file-only message)."""
+        attachment = _make_attachment()
+        result = _build_content_parts("", [attachment])
+        assert isinstance(result, list)
+        text_parts = [p for p in result if p["type"] == "text"]
+        assert len(text_parts) == 0
+
+
+class TestMultimodalRelayPipeline:
+    """Integration-style tests for the relay pipeline with attachments."""
+
+    @pytest.mark.asyncio
+    async def test_body_size_includes_attachment_bytes(self) -> None:
+        """NFR-7: Body size limit includes attachment binary data."""
+        big_data = b"x" * (10 * 1024 * 1024 + 1)  # slightly over 10MB
+        attachment = _make_attachment(data=big_data)
+        pipeline = _make_pipeline()
+        msg = _make_webhook_message(text="", attachments=[attachment])
+
+        result = await pipeline.relay(msg)
+        assert result.status_code == 413
+
+    @pytest.mark.asyncio
+    async def test_history_stores_text_summary_not_base64(self) -> None:
+        """History entries use text summaries, not base64 blobs."""
+        history = MagicMock()
+        history.get.return_value = [
+            {"role": "user", "content": "here is the pdf [document: report.pdf]"},
+        ]
+        sanitizer = MagicMock()
+        sanitizer.sanitize.return_value = MagicMock(clean="here is the pdf", injection_detected=False)
+        pipeline = _make_pipeline(sanitizer=sanitizer, conversation_history=history)
+
+        attachment = _make_attachment(
+            file_type=AttachmentType.DOCUMENT,
+            file_name="report.pdf",
+            data=b"pdf bytes",
+        )
+        msg = _make_webhook_message(text="here is the pdf", attachments=[attachment])
+
+        with patch.object(pipeline, "_forward_to_upstream", new_callable=AsyncMock) as mock_fwd:
+            mock_fwd.return_value = WebhookResponse(text="ok", status_code=200)
+            await pipeline.relay(msg)
+
+        # History was appended with text summary (not raw base64)
+        appended_text = history.append_user.call_args[0][1]
+        assert "base64" not in appended_text
+        assert "[document: report.pdf]" in appended_text
+
+    @pytest.mark.asyncio
+    async def test_upstream_request_uses_multimodal_content(self) -> None:
+        """Current message to upstream uses full multimodal content array."""
+        history = MagicMock()
+        history.get.return_value = [
+            {"role": "user", "content": "photo [image: photo.jpg]"},
+        ]
+        sanitizer = MagicMock()
+        sanitizer.sanitize.return_value = MagicMock(clean="photo", injection_detected=False)
+        pipeline = _make_pipeline(sanitizer=sanitizer, conversation_history=history)
+
+        attachment = _make_attachment(
+            file_type=AttachmentType.IMAGE,
+            mime_type="image/jpeg",
+            file_name="photo.jpg",
+            data=b"img",
+        )
+        msg = _make_webhook_message(text="photo", attachments=[attachment])
+
+        with patch.object(pipeline, "_forward_to_upstream", new_callable=AsyncMock) as mock_fwd:
+            mock_fwd.return_value = WebhookResponse(text="ok", status_code=200)
+            await pipeline.relay(msg)
+
+        forwarded_body = mock_fwd.call_args[0][0]
+        last_msg = forwarded_body["messages"][-1]
+        # Current message content is multimodal list, not plain string
+        assert isinstance(last_msg["content"], list)
+        types = [part["type"] for part in last_msg["content"]]
+        assert "image_url" in types

@@ -396,8 +396,8 @@ def _register_webhook_routes(
             body = json.loads(raw_body)
 
             # Replay protection (FR-2.7)
-            update_id, text, chat_id = tg_relay.extract_message(body)
-            if not replay_protection.check_telegram(update_id):
+            extraction = tg_relay.extract_message(body)
+            if not replay_protection.check_telegram(extraction.update_id):
                 if audit_logger:
                     audit_logger.log(AuditEvent(
                         event_type=AuditEventType.WEBHOOK_REPLAY_REJECTED,
@@ -405,12 +405,19 @@ def _register_webhook_routes(
                         result="blocked",
                         risk_level=RiskLevel.HIGH,
                         source_ip=source_ip,
-                        details={"source": "telegram", "update_id": update_id},
+                        details={"source": "telegram", "update_id": extraction.update_id},
                     ))
                 return JSONResponse({"error": "Replay detected"}, status_code=409)
 
-            if not text:
-                return JSONResponse({"status": "ok", "message": "No text to process"})
+            # Download file attachments (after replay check to avoid wasted work)
+            attachments = await tg_relay.build_attachments(
+                extraction.file_infos,
+                audit_logger=audit_logger,
+                sender_id=str(extraction.chat_id),
+            )
+
+            if not extraction.text and not attachments:
+                return JSONResponse({"status": "ok", "message": "No content to process"})
 
             # Audit: received
             if audit_logger:
@@ -420,7 +427,12 @@ def _register_webhook_routes(
                     result="success",
                     risk_level=RiskLevel.INFO,
                     source_ip=source_ip,
-                    details={"source": "telegram", "chat_id": chat_id},
+                    details={
+                        "source": "telegram",
+                        "chat_id": extraction.chat_id,
+                        "attachment_count": len(attachments),
+                        "attachment_types": [a.type.value for a in attachments],
+                    },
                 ))
 
             # Run pipeline
@@ -428,16 +440,19 @@ def _register_webhook_routes(
 
             msg = WebhookMessage(
                 source="telegram",
-                text=text,
-                sender_id=str(chat_id),
-                metadata={"chat_id": chat_id},
+                text=extraction.text,
+                sender_id=str(extraction.chat_id),
+                metadata={"chat_id": extraction.chat_id},
+                attachments=attachments,
             )
             result = await pipeline.relay(msg)
 
             # Send response back via Telegram (fire and forget errors)
             if result.status_code == 200 and result.text:
                 try:
-                    await tg_relay.send_response(chat_id=chat_id, text=result.text)
+                    await tg_relay.send_response(
+                        chat_id=extraction.chat_id, text=result.text,
+                    )
                 except Exception:
                     logging.exception("Failed to send Telegram response")
 
