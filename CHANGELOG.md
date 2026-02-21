@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-02-21
+
+### Added
+- **Telegram file attachment support** — Telegram bot now processes images, PDFs, documents, audio, voice messages, video, and stickers instead of silently ignoring them
+  - Two-step Telegram API download (`getFile` → binary fetch) with 20 MB cap pre- and post-download
+  - Attachments forwarded to the upstream LLM as OpenAI multimodal content blocks (`image_url`, `input_audio`, `file`)
+  - Captions on media messages are treated as the message text
+  - `TelegramFileInfo` and `TelegramExtraction` dataclasses replacing the old tuple return from `extract_message()`
+  - `download_file()` and `build_attachments()` methods on `TelegramRelay`; download failures are skipped gracefully with a warning log
+  - `AttachmentType` enum and `Attachment` dataclass in `src/webhook/models.py`
+  - `WEBHOOK_FILE_DOWNLOAD` audit event type for per-file download telemetry
+
+### Fixed
+- **Attachment filename prompt injection (P1)** — filenames from the Telegram payload (user-controlled) are now individually sanitized through `PromptSanitizer` before being appended to conversation history; filenames that trigger injection detection are replaced with their generic type label (e.g. `image`)
+- **Silent drop on all-download-failure (P2)** — when a file-only Telegram message arrives but all attachment downloads fail, the bot now sends the user an actionable error message instead of silently returning HTTP 200
+- **Body size check accuracy** — attachment size limit now uses the exact base64-encoded byte count `(n + 2) // 3 * 4` rather than raw byte length, correctly enforcing the 10 MB cap on the payload actually sent upstream (was ~33 % under-counted)
+- **Dead code removed** — `_attachment_summary()` module-level function deleted; history summaries are built inline in `relay()` using the already-sanitized `safe_name`
+
 ## [1.4.2] - 2026-02-19
 
 ### Added
